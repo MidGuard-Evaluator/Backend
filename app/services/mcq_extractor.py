@@ -11,13 +11,13 @@ import os
 from pathlib import Path
 from typing import Any
 import httpx
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 from app.schemas.module1 import McqItemSchema, McqPageImagePayload
 
 GEMINI_MODELS = [
+    "gemini-4-hydrogen",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-4-hydrogen",
     "gemma-4-26b-a4b-it",
     "gemini-3.8-flash",
 ]
@@ -37,14 +37,19 @@ def _resolve_gemini_api_key() -> str:
                     return stripped.split("=", 1)[1].strip().strip('"').strip("'")
     return ""
 
-MCQ_SYSTEM_PROMPT = """You are an academic optical mark & handwritten MCQ exam sheet reader.
-Inspect the provided exam answer sheet image(s) (which already have student identity headers masked) and extract every multiple-choice question number and the student's selected option.
+MCQ_SYSTEM_PROMPT = """You are an ultra-precise academic optical mark (OMR) & handwritten MCQ exam sheet reader.
+Inspect the provided exam answer sheet image(s) (which already have student identity headers masked) and extract every multiple-choice question number and the student's exact selected option.
 
-Rules:
+Critical Accuracy Rules for Bubble / OMR Sheets:
 1. First detect the option labeling printed on the sheet:
-   - If the bubbles/options are numbered (e.g. (1) (2) (3) (4) (5) or 1-4), set "optionStyle": "NUMERIC" and "optionLabels": ["1", "2", "3", "4", "5"] (or ["1", "2", "3", "4"] if 4 choices).
-   - If the bubbles/options are lettered (e.g. A B C D E or A-D), set "optionStyle": "ALPHA" and "optionLabels": ["A", "B", "C", "D", "E"] (or ["A", "B", "C", "D"] if 4 choices).
-2. Return ONLY valid JSON matching this schema:
+   - If bubbles/options are numbered (e.g. (1) (2) (3) (4) (5) or 1-4), set "optionStyle": "NUMERIC" and "optionLabels": ["1", "2", "3", "4", "5"] (or ["1", "2", "3", "4"] if 4 choices).
+   - If bubbles/options are lettered (e.g. A B C D E or A-D), set "optionStyle": "ALPHA" and "optionLabels": ["A", "B", "C", "D", "E"] (or ["A", "B", "C", "D"] if 4 choices).
+2. Read the sheet column by column from top to bottom (e.g., Q1-10, Q11-20, Q21-30, Q31-40, Q41-50).
+3. For EVERY question row, carefully count the bubble positions from LEFT to RIGHT (1st, 2nd, 3rd, 4th, 5th):
+   - Check how many UNSHADED white bubbles are to the LEFT of the filled black bubble, and how many UNSHADED white bubbles are to the RIGHT of the filled black bubble.
+   - Example: if there are 3 empty bubbles on the left and 1 empty bubble on the right, the filled bubble is position 4 (NOT 5). Only report 5 if the rightmost bubble itself is filled and there are 4 empty bubbles to its left.
+   - If a mark is faint, partially erased, or ambiguous, reflect that honestly with a lower confidence (< 0.78) and add a brief note.
+4. Return ONLY valid JSON matching this schema:
 {
   "optionStyle": "NUMERIC",
   "optionLabels": ["1", "2", "3", "4", "5"],
@@ -52,14 +57,14 @@ Rules:
     {
       "questionNumber": 1,
       "selectedOption": "2",
-      "confidence": 0.95,
+      "confidence": 0.98,
       "note": ""
     }
   ]
 }
-3. "selectedOption" MUST match the detected sheet labels ("1"-"5" for numeric sheets, "A"-"E" for alpha sheets), or "BLANK" (if unanswered), or "MULTIPLE" (if more than one option is marked/crossed). Do NOT convert numbers into letters or letters into numbers.
-4. Extract all questions in ascending order of questionNumber.
-5. "confidence" must be a float between 0.0 and 1.0."""
+5. "selectedOption" MUST match the detected sheet labels ("1"-"5" for numeric sheets, "A"-"E" for alpha sheets), or "BLANK" (if unanswered), or "MULTIPLE" (if more than one option is marked/crossed). Do NOT convert numbers into letters or letters into numbers.
+6. Extract all questions in ascending order of questionNumber.
+7. "confidence" must be a float between 0.0 and 1.0."""
 
 
 def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[McqItemSchema]:
@@ -154,6 +159,20 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
     return items
 
 
+def _enhance_sheet_for_vision(img_payload: McqPageImagePayload) -> tuple[str, str]:
+    """Applies mild autocontrast & sharpening so small OMR bubble borders and filled marks are crisp."""
+    try:
+        raw_bytes = base64.b64decode(img_payload.base64Data)
+        pil_img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+        pil_img = ImageOps.autocontrast(pil_img, cutoff=1)
+        pil_img = ImageEnhance.Sharpness(pil_img).enhance(1.35)
+        out = io.BytesIO()
+        pil_img.save(out, format="PNG", optimize=True)
+        return "image/png", base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return img_payload.mimeType or "image/jpeg", img_payload.base64Data
+
+
 async def extract_mcq_from_images(
     images: list[McqPageImagePayload],
 ) -> tuple[str, str, list[str], list[McqItemSchema]]:
@@ -165,17 +184,18 @@ async def extract_mcq_from_images(
     api_key = _resolve_gemini_api_key()
     parts: list[dict[str, Any]] = [{"text": MCQ_SYSTEM_PROMPT}]
     for img in images:
+        enhanced_mime, enhanced_b64 = _enhance_sheet_for_vision(img)
         parts.append(
             {
                 "inlineData": {
-                    "mimeType": img.mimeType or "image/jpeg",
-                    "data": img.base64Data,
+                    "mimeType": enhanced_mime,
+                    "data": enhanced_b64,
                 }
             }
         )
 
     if api_key:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for model in GEMINI_MODELS:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
                 gen_config: dict[str, Any] = {"temperature": 0.1}
