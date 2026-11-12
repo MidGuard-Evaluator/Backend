@@ -41,20 +41,25 @@ MCQ_SYSTEM_PROMPT = """You are an academic optical mark & handwritten MCQ exam s
 Inspect the provided exam answer sheet image(s) (which already have student identity headers masked) and extract every multiple-choice question number and the student's selected option.
 
 Rules:
-1. Return ONLY valid JSON matching this schema:
+1. First detect the option labeling printed on the sheet:
+   - If the bubbles/options are numbered (e.g. (1) (2) (3) (4) (5) or 1-4), set "optionStyle": "NUMERIC" and "optionLabels": ["1", "2", "3", "4", "5"] (or ["1", "2", "3", "4"] if 4 choices).
+   - If the bubbles/options are lettered (e.g. A B C D E or A-D), set "optionStyle": "ALPHA" and "optionLabels": ["A", "B", "C", "D", "E"] (or ["A", "B", "C", "D"] if 4 choices).
+2. Return ONLY valid JSON matching this schema:
 {
+  "optionStyle": "NUMERIC",
+  "optionLabels": ["1", "2", "3", "4", "5"],
   "items": [
     {
       "questionNumber": 1,
-      "selectedOption": "A",
+      "selectedOption": "2",
       "confidence": 0.95,
       "note": ""
     }
   ]
 }
-2. "selectedOption" must be one of: "A", "B", "C", "D", "E", "BLANK" (if unanswered), or "MULTIPLE" (if more than one option is marked/crossed).
-3. Extract all questions in ascending order of questionNumber.
-4. "confidence" must be a float between 0.0 and 1.0."""
+3. "selectedOption" MUST match the detected sheet labels ("1"-"5" for numeric sheets, "A"-"E" for alpha sheets), or "BLANK" (if unanswered), or "MULTIPLE" (if more than one option is marked/crossed). Do NOT convert numbers into letters or letters into numbers.
+4. Extract all questions in ascending order of questionNumber.
+5. "confidence" must be a float between 0.0 and 1.0."""
 
 
 def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[McqItemSchema]:
@@ -149,7 +154,9 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
     return items
 
 
-async def extract_mcq_from_images(images: list[McqPageImagePayload]) -> tuple[str, list[McqItemSchema]]:
+async def extract_mcq_from_images(
+    images: list[McqPageImagePayload],
+) -> tuple[str, str, list[str], list[McqItemSchema]]:
     """
     Calls the configured Gemini Vision API over HTTPS/TLS with header-masked images.
     Retries across fallback models and falls back to optical mark grid analysis if the upstream
@@ -197,12 +204,16 @@ async def extract_mcq_from_images(images: list[McqPageImagePayload]) -> tuple[st
                     parsed = json.loads(cleaned)
                     raw_items = parsed.get("items", [])
                     if isinstance(raw_items, list) and len(raw_items) > 0:
+                        allowed_opts = {"A", "B", "C", "D", "E", "1", "2", "3", "4", "5", "BLANK", "MULTIPLE"}
                         normalized: list[McqItemSchema] = []
+                        has_numeric = False
                         for idx, it in enumerate(raw_items):
                             q_num = int(it.get("questionNumber") or (idx + 1))
                             opt = str(it.get("selectedOption", "BLANK")).upper().strip()
-                            if opt not in ("A", "B", "C", "D", "E", "BLANK", "MULTIPLE"):
+                            if opt not in allowed_opts:
                                 opt = "BLANK"
+                            if opt in {"1", "2", "3", "4", "5"}:
+                                has_numeric = True
                             conf_val = it.get("confidence", "unknown")
                             conf: float | str = (
                                 round(float(conf_val), 2)
@@ -217,9 +228,21 @@ async def extract_mcq_from_images(images: list[McqPageImagePayload]) -> tuple[st
                                     note=str(it["note"]) if it.get("note") else None,
                                 )
                             )
-                        return model, normalized
+                        detected_style = str(parsed.get("optionStyle", "")).upper().strip()
+                        if detected_style not in ("ALPHA", "NUMERIC"):
+                            detected_style = "NUMERIC" if has_numeric else "ALPHA"
+                        raw_labels = parsed.get("optionLabels")
+                        if isinstance(raw_labels, list) and len(raw_labels) >= 2:
+                            labels = [str(lbl).upper().strip() for lbl in raw_labels]
+                        else:
+                            labels = (
+                                ["1", "2", "3", "4", "5"]
+                                if detected_style == "NUMERIC"
+                                else ["A", "B", "C", "D", "E"]
+                            )
+                        return model, detected_style, labels, normalized
                 except Exception:
                     continue
 
     # Rate-limit / 503 High-Demand resilience fallback (SRS Section 4.4)
-    return "omr-vision-v1", _analyze_optical_marks_fallback(images)
+    return "omr-vision-v1", "ALPHA", ["A", "B", "C", "D", "E"], _analyze_optical_marks_fallback(images)

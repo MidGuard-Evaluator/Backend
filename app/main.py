@@ -49,10 +49,12 @@ async def health_check() -> dict[str, str]:
 
 @app.post("/api/v1/module1/ocr/mcq", response_model=McqExtractionResponse)
 async def extract_mcq_endpoint(payload: McqExtractionRequest) -> McqExtractionResponse:
-    model_used, items = await extract_mcq_from_images(payload.images)
+    model_used, option_style, option_labels, items = await extract_mcq_from_images(payload.images)
     return McqExtractionResponse(
         ok=True,
         model=model_used,
+        optionStyle=option_style,  # type: ignore[arg-type]
+        optionLabels=option_labels,
         items=items,
     )
 

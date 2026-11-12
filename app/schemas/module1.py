@@ -70,7 +70,11 @@ class McqItemSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     questionNumber: int = Field(..., ge=1)
-    selectedOption: Literal["A", "B", "C", "D", "E", "BLANK", "MULTIPLE"]
+    selectedOption: Literal[
+        "A", "B", "C", "D", "E",
+        "1", "2", "3", "4", "5",
+        "BLANK", "MULTIPLE",
+    ]
     confidence: float | Literal["unknown"]
     note: Optional[str] = None
     edited: Optional[bool] = None
@@ -81,6 +85,8 @@ class McqExtractionResponse(BaseModel):
 
     ok: bool
     model: Optional[str] = None
+    optionStyle: Optional[Literal["ALPHA", "NUMERIC"]] = None
+    optionLabels: Optional[list[str]] = None
     items: list[McqItemSchema] = Field(default_factory=list)
     error: Optional[str] = None
 
