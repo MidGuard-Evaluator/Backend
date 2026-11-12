@@ -62,6 +62,7 @@ class McqPageImagePayload(BaseModel):
 class McqExtractionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    scriptId: Optional[str] = None
     images: list[McqPageImagePayload] = Field(..., min_length=1, max_length=10)
 
 
