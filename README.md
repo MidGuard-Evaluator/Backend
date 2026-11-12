@@ -21,3 +21,4 @@ uvicorn app.main:app --reload --port 8000
 ## Module 1 Endpoints
 - `GET /health` — Service and version health check
 - `POST /api/v1/module1/ocr/mcq` — Header-masked MCQ answer sheet vision extraction with optical-mark fallback (`NFR-06`)
+
