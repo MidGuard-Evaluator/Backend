@@ -11,8 +11,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from app.schemas.auth import (
+    AuthResponseSchema,
+    LoginRequestSchema,
+    RegisterRequestSchema,
+    SessionVerifyRequestSchema,
+    SessionVerifyResponseSchema,
+)
 from app.schemas.module1 import McqExtractionRequest, McqExtractionResponse
+from app.services.crypto_service import verify_session_jwt
 from app.services.mcq_extractor import extract_mcq_from_images
+from app.services.supabase_auth import authenticate_with_supabase, register_user_in_supabase
 
 # Load environment variables from backend/.env or frontend/.env
 backend_env = Path(__file__).resolve().parent.parent / ".env"
@@ -57,4 +67,34 @@ async def extract_mcq_endpoint(payload: McqExtractionRequest) -> McqExtractionRe
         optionLabels=option_labels,
         items=items,
     )
+
+
+@app.post("/api/v1/auth/login", response_model=AuthResponseSchema)
+async def login_endpoint(payload: LoginRequestSchema) -> JSONResponse:
+    ok, user, token, error = await authenticate_with_supabase(
+        payload.username, payload.password, payload.role
+    )
+    if not ok or not user or not token:
+        body = AuthResponseSchema(ok=False, error=error or "Invalid username or password.")
+        return JSONResponse(status_code=401, content=body.model_dump())
+    body = AuthResponseSchema(ok=True, user=user, token=token)
+    return JSONResponse(status_code=200, content=body.model_dump())
+
+
+@app.post("/api/v1/auth/register", response_model=AuthResponseSchema)
+async def register_endpoint(payload: RegisterRequestSchema) -> JSONResponse:
+    ok, user, token, error = await register_user_in_supabase(payload)
+    if not ok or not user or not token:
+        body = AuthResponseSchema(ok=False, error=error or "Could not create user.")
+        return JSONResponse(status_code=400, content=body.model_dump())
+    body = AuthResponseSchema(ok=True, user=user, token=token)
+    return JSONResponse(status_code=200, content=body.model_dump())
+
+
+@app.post("/api/v1/auth/session", response_model=SessionVerifyResponseSchema)
+async def verify_session_endpoint(payload: SessionVerifyRequestSchema) -> SessionVerifyResponseSchema:
+    user = verify_session_jwt(payload.token)
+    if not user:
+        return SessionVerifyResponseSchema(authenticated=False, user=None)
+    return SessionVerifyResponseSchema(authenticated=True, user=user)
 
