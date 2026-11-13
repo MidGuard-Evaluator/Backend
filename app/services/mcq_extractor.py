@@ -15,7 +15,7 @@ import httpx
 from PIL import Image, ImageEnhance, ImageOps
 from app.schemas.module1 import McqItemSchema, McqPageImagePayload
 
-DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
+DEFAULT_GEMINI_MODEL = "gemini-3-flash-preview"
 
 
 def _resolve_env_var(name: str, default: str = "") -> str:

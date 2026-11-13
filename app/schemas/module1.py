@@ -106,7 +106,8 @@ class StructuredRegionPayload(BaseModel):
 class StructuredOcrRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    regions: list[StructuredRegionPayload] = Field(..., min_length=1, max_length=25)
+    pages: Optional[list[McqPageImagePayload]] = Field(default=None, max_length=10)
+    regions: Optional[list[StructuredRegionPayload]] = Field(default=None, max_length=25)
 
 
 class ExtractedSpanSchema(BaseModel):
@@ -137,6 +138,9 @@ class StructuredQuestionResultSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     questionId: str
+    questionNumber: Optional[str] = None
+    pageNumber: Optional[int] = Field(default=None, ge=1)
+    bbox: Optional[RectSchema] = None
     rawText: str
     blankDetected: bool = False
     spans: list[ExtractedSpanSchema] = Field(default_factory=list)

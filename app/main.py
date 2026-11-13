@@ -77,10 +77,23 @@ async def extract_mcq_endpoint(payload: McqExtractionRequest) -> McqExtractionRe
 @app.post("/api/v1/module1/ocr/structured", response_model=StructuredOcrResponse)
 async def extract_structured_endpoint(payload: StructuredOcrRequest) -> StructuredOcrResponse:
     from app.services.mcq_extractor import _resolve_gemini_model
-    from app.services.structured_extractor import extract_structured_from_regions
+    from app.services.structured_extractor import (
+        extract_structured_from_pages,
+        extract_structured_from_regions,
+    )
 
     try:
-        model_used, results = await extract_structured_from_regions(payload.regions)
+        if payload.pages:
+            model_used, results = await extract_structured_from_pages(payload.pages)
+        elif payload.regions:
+            model_used, results = await extract_structured_from_regions(payload.regions)
+        else:
+            return StructuredOcrResponse(
+                ok=False,
+                model=_resolve_gemini_model(),
+                results=[],
+                error="Either pages or regions must be provided.",
+            )
         return StructuredOcrResponse(
             ok=True,
             model=model_used,
