@@ -57,3 +57,4 @@ class SessionVerifyResponseSchema(BaseModel):
 
     authenticated: bool
     user: Optional[SessionUserSchema] = None
+

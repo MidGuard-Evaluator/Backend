@@ -206,3 +206,4 @@ async def register_user_in_supabase(
     )
     token = sign_session_jwt(user)
     return True, user, token, None
+

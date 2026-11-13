@@ -75,6 +75,7 @@ class McqItemSchema(BaseModel):
         "1", "2", "3", "4", "5",
         "BLANK", "MULTIPLE",
     ]
+    markedOptions: Optional[list[str]] = None
     confidence: float | Literal["unknown"]
     note: Optional[str] = None
     edited: Optional[bool] = None

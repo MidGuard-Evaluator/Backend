@@ -101,3 +101,4 @@ def verify_session_jwt(token: str | None) -> SessionUserSchema | None:
         )
     except Exception:
         return None
+
