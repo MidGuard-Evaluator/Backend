@@ -19,7 +19,12 @@ from app.schemas.auth import (
     SessionVerifyRequestSchema,
     SessionVerifyResponseSchema,
 )
-from app.schemas.module1 import McqExtractionRequest, McqExtractionResponse
+from app.schemas.module1 import (
+    McqExtractionRequest,
+    McqExtractionResponse,
+    StructuredOcrRequest,
+    StructuredOcrResponse,
+)
 from app.services.crypto_service import verify_session_jwt
 from app.services.mcq_extractor import extract_mcq_from_images
 from app.services.supabase_auth import authenticate_with_supabase, register_user_in_supabase
@@ -67,6 +72,27 @@ async def extract_mcq_endpoint(payload: McqExtractionRequest) -> McqExtractionRe
         optionLabels=option_labels,
         items=items,
     )
+
+
+@app.post("/api/v1/module1/ocr/structured", response_model=StructuredOcrResponse)
+async def extract_structured_endpoint(payload: StructuredOcrRequest) -> StructuredOcrResponse:
+    from app.services.mcq_extractor import _resolve_gemini_model
+    from app.services.structured_extractor import extract_structured_from_regions
+
+    try:
+        model_used, results = await extract_structured_from_regions(payload.regions)
+        return StructuredOcrResponse(
+            ok=True,
+            model=model_used,
+            results=results,
+        )
+    except Exception as exc:
+        return StructuredOcrResponse(
+            ok=False,
+            model=_resolve_gemini_model(),
+            results=[],
+            error=str(exc),
+        )
 
 
 @app.post("/api/v1/auth/login", response_model=AuthResponseSchema)

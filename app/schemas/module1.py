@@ -91,3 +91,63 @@ class McqExtractionResponse(BaseModel):
     items: list[McqItemSchema] = Field(default_factory=list)
     error: Optional[str] = None
 
+
+class StructuredRegionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questionId: str
+    questionNumber: str = "Q1"
+    questionPrompt: Optional[str] = None
+    pageNumber: int = Field(default=1, ge=1)
+    mimeType: str = "image/jpeg"
+    base64Data: str = Field(..., min_length=16)
+
+
+class StructuredOcrRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    regions: list[StructuredRegionPayload] = Field(..., min_length=1, max_length=25)
+
+
+class ExtractedSpanSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    lineNumber: int = Field(..., ge=1)
+    text: str
+    confidence: float = Field(..., ge=0.0, le=1.0)
+
+
+class ExtractedFlagSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal[
+        "LOW_CONFIDENCE",
+        "UNCLEAR_CHAR",
+        "OUT_OF_BOX",
+        "DIAGRAM_DETECTED",
+        "BLANK_ANSWER",
+        "UNSUPPORTED_CONTENT",
+    ]
+    message: str
+    spanId: Optional[str] = None
+
+
+class StructuredQuestionResultSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    questionId: str
+    rawText: str
+    blankDetected: bool = False
+    spans: list[ExtractedSpanSchema] = Field(default_factory=list)
+    flags: list[ExtractedFlagSchema] = Field(default_factory=list)
+
+
+class StructuredOcrResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    model: str
+    results: list[StructuredQuestionResultSchema] = Field(default_factory=list)
+    error: Optional[str] = None
+

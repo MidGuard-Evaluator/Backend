@@ -15,27 +15,29 @@ import httpx
 from PIL import Image, ImageEnhance, ImageOps
 from app.schemas.module1 import McqItemSchema, McqPageImagePayload
 
-GEMINI_MODELS = [
-    "gemini-4-hydrogen",
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemma-4-26b-a4b-it",
-    "gemini-3.8-flash",
-]
+DEFAULT_GEMINI_MODEL = "gemini-4-hydrogen"
 
 
-def _resolve_gemini_api_key() -> str:
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    if key:
-        return key
+def _resolve_env_var(name: str, default: str = "") -> str:
+    val = os.getenv(name, "").strip()
+    if val:
+        return val
     base_dir = Path(__file__).resolve().parents[2]
     for env_path in (base_dir / ".env", base_dir.parent / "frontend" / ".env"):
         if env_path.exists():
             for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
                 stripped = line.strip()
-                if stripped.startswith("GEMINI_API_KEY="):
+                if stripped.startswith(f"{name}="):
                     return stripped.split("=", 1)[1].strip().strip('"').strip("'")
-    return ""
+    return default
+
+
+def _resolve_gemini_api_key() -> str:
+    return _resolve_env_var("GEMINI_API_KEY", "")
+
+
+def _resolve_gemini_model() -> str:
+    return _resolve_env_var("GEMINI_MODEL", DEFAULT_GEMINI_MODEL) or DEFAULT_GEMINI_MODEL
 
 
 MCQ_SYSTEM_PROMPT = """You are an ultra-precise academic optical mark (OMR) & handwritten MCQ exam sheet reader.
@@ -294,20 +296,19 @@ async def _detect_option_labels_with_gemini(
     if not api_key:
         return "NUMERIC", ["1", "2", "3", "4", "5"]
 
+    model = _resolve_gemini_model()
     parts = [{"text": LABEL_DETECT_PROMPT}] + enhanced_parts
     async with httpx.AsyncClient(timeout=8.0) as client:
-        for model in GEMINI_MODELS[:3]:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
-            if model.startswith("gemini-"):
-                gen_config["responseMimeType"] = "application/json"
-            try:
-                resp = await client.post(
-                    url,
-                    json={"contents": [{"parts": parts}], "generationConfig": gen_config},
-                )
-                if resp.status_code != 200:
-                    continue
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
+        if model.startswith("gemini-"):
+            gen_config["responseMimeType"] = "application/json"
+        try:
+            resp = await client.post(
+                url,
+                json={"contents": [{"parts": parts}], "generationConfig": gen_config},
+            )
+            if resp.status_code == 200:
                 data = resp.json()
                 raw_text = (
                     data.get("candidates", [{}])[0]
@@ -315,25 +316,24 @@ async def _detect_option_labels_with_gemini(
                     .get("parts", [{}])[0]
                     .get("text", "")
                 )
-                if not raw_text:
-                    continue
-                cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
-                parsed = json.loads(cleaned)
-                style = str(parsed.get("optionStyle", "")).upper().strip()
-                raw_labels = parsed.get("optionLabels")
-                if style in ("NUMERIC", "ALPHA"):
-                    if isinstance(raw_labels, list) and len(raw_labels) >= 4:
-                        clean_labels = [str(x).upper().strip() for x in raw_labels[:5]]
-                        if style == "NUMERIC" and all(x in ("1", "2", "3", "4", "5") for x in clean_labels):
-                            return "NUMERIC", clean_labels
-                        if style == "ALPHA" and all(x in ("A", "B", "C", "D", "E") for x in clean_labels):
-                            return "ALPHA", clean_labels
-                    return (
-                        style,
-                        ["1", "2", "3", "4", "5"] if style == "NUMERIC" else ["A", "B", "C", "D", "E"],
-                    )
-            except Exception:
-                continue
+                if raw_text:
+                    cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
+                    parsed = json.loads(cleaned)
+                    style = str(parsed.get("optionStyle", "")).upper().strip()
+                    raw_labels = parsed.get("optionLabels")
+                    if style in ("NUMERIC", "ALPHA"):
+                        if isinstance(raw_labels, list) and len(raw_labels) >= 4:
+                            clean_labels = [str(x).upper().strip() for x in raw_labels[:5]]
+                            if style == "NUMERIC" and all(x in ("1", "2", "3", "4", "5") for x in clean_labels):
+                                return "NUMERIC", clean_labels
+                            if style == "ALPHA" and all(x in ("A", "B", "C", "D", "E") for x in clean_labels):
+                                return "ALPHA", clean_labels
+                        return (
+                            style,
+                            ["1", "2", "3", "4", "5"] if style == "NUMERIC" else ["A", "B", "C", "D", "E"],
+                        )
+        except Exception:
+            pass
 
     return "NUMERIC", ["1", "2", "3", "4", "5"]
 
@@ -454,25 +454,24 @@ async def extract_mcq_from_images(
     if omr_items:
         return "omr-hybrid-v2", option_style, option_labels, omr_items
 
-    # 2. Non-bubble sheet fallback: deterministic Gemini Vision full extraction
+    # 2. Non-bubble sheet fallback: deterministic Gemini Vision full extraction (single pinned model)
     parts: list[dict[str, Any]] = [{"text": MCQ_SYSTEM_PROMPT}] + image_parts
+    model = _resolve_gemini_model()
     if api_key:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            for model in GEMINI_MODELS:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-                gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
-                if model.startswith("gemini-"):
-                    gen_config["responseMimeType"] = "application/json"
-                try:
-                    resp = await client.post(
-                        url,
-                        json={
-                            "contents": [{"parts": parts}],
-                            "generationConfig": gen_config,
-                        },
-                    )
-                    if resp.status_code != 200:
-                        continue
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
+            if model.startswith("gemini-"):
+                gen_config["responseMimeType"] = "application/json"
+            try:
+                resp = await client.post(
+                    url,
+                    json={
+                        "contents": [{"parts": parts}],
+                        "generationConfig": gen_config,
+                    },
+                )
+                if resp.status_code == 200:
                     data = resp.json()
                     raw_text = (
                         data.get("candidates", [{}])[0]
@@ -480,76 +479,75 @@ async def extract_mcq_from_images(
                         .get("parts", [{}])[0]
                         .get("text", "")
                     )
-                    if not raw_text:
-                        continue
-                    cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
-                    parsed = json.loads(cleaned)
-                    raw_items = parsed.get("items", [])
-                    if isinstance(raw_items, list) and len(raw_items) > 0:
-                        allowed_opts = {
-                            "A", "B", "C", "D", "E",
-                            "1", "2", "3", "4", "5",
-                            "BLANK", "MULTIPLE",
-                        }
-                        normalized: list[McqItemSchema] = []
-                        has_numeric = False
-                        for idx, it in enumerate(raw_items):
-                            q_num = int(it.get("questionNumber") or (idx + 1))
-                            opt = str(it.get("selectedOption", "BLANK")).upper().strip()
-                            if opt not in allowed_opts:
-                                opt = "BLANK"
-                            if opt in {"1", "2", "3", "4", "5"}:
-                                has_numeric = True
-
-                            raw_marked = it.get("markedOptions")
-                            marked_list: list[str] | None = None
-                            if isinstance(raw_marked, list) and len(raw_marked) > 0:
-                                marked_list = [
-                                    str(m).upper().strip()
-                                    for m in raw_marked
-                                    if str(m).upper().strip() in {"A", "B", "C", "D", "E", "1", "2", "3", "4", "5"}
-                                ]
-                                if any(m in {"1", "2", "3", "4", "5"} for m in marked_list):
+                    if raw_text:
+                        cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
+                        parsed = json.loads(cleaned)
+                        raw_items = parsed.get("items", [])
+                        if isinstance(raw_items, list) and len(raw_items) > 0:
+                            allowed_opts = {
+                                "A", "B", "C", "D", "E",
+                                "1", "2", "3", "4", "5",
+                                "BLANK", "MULTIPLE",
+                            }
+                            normalized: list[McqItemSchema] = []
+                            has_numeric = False
+                            for idx, it in enumerate(raw_items):
+                                q_num = int(it.get("questionNumber") or (idx + 1))
+                                opt = str(it.get("selectedOption", "BLANK")).upper().strip()
+                                if opt not in allowed_opts:
+                                    opt = "BLANK"
+                                if opt in {"1", "2", "3", "4", "5"}:
                                     has_numeric = True
-                            elif opt not in ("BLANK", "MULTIPLE"):
-                                marked_list = [opt]
 
-                            conf_val = it.get("confidence", "unknown")
-                            conf: float | str = (
-                                round(float(conf_val), 2)
-                                if isinstance(conf_val, (int, float)) and 0 <= float(conf_val) <= 1
-                                else "unknown"
-                            )
-                            note_val = str(it["note"]) if it.get("note") else None
-                            if opt == "MULTIPLE" and marked_list and len(marked_list) > 1 and not note_val:
-                                note_val = (
-                                    f"Multiple answers marked ({', '.join(marked_list)}). Select one marked answer."
-                                )
+                                raw_marked = it.get("markedOptions")
+                                marked_list: list[str] | None = None
+                                if isinstance(raw_marked, list) and len(raw_marked) > 0:
+                                    marked_list = [
+                                        str(m).upper().strip()
+                                        for m in raw_marked
+                                        if str(m).upper().strip() in {"A", "B", "C", "D", "E", "1", "2", "3", "4", "5"}
+                                    ]
+                                    if any(m in {"1", "2", "3", "4", "5"} for m in marked_list):
+                                        has_numeric = True
+                                elif opt not in ("BLANK", "MULTIPLE"):
+                                    marked_list = [opt]
 
-                            normalized.append(
-                                McqItemSchema(
-                                    questionNumber=q_num,
-                                    selectedOption=opt,  # type: ignore[arg-type]
-                                    markedOptions=marked_list,
-                                    confidence=conf,  # type: ignore[arg-type]
-                                    note=note_val,
+                                conf_val = it.get("confidence", "unknown")
+                                conf: float | str = (
+                                    round(float(conf_val), 2)
+                                    if isinstance(conf_val, (int, float)) and 0 <= float(conf_val) <= 1
+                                    else "unknown"
                                 )
-                            )
-                        detected_style = str(parsed.get("optionStyle", "")).upper().strip()
-                        if detected_style not in ("ALPHA", "NUMERIC"):
-                            detected_style = "NUMERIC" if has_numeric else "ALPHA"
-                        raw_labels = parsed.get("optionLabels")
-                        if isinstance(raw_labels, list) and len(raw_labels) >= 2:
-                            labels = [str(lbl).upper().strip() for lbl in raw_labels]
-                        else:
-                            labels = (
-                                ["1", "2", "3", "4", "5"]
-                                if detected_style == "NUMERIC"
-                                else ["A", "B", "C", "D", "E"]
-                            )
-                        return model, detected_style, labels, normalized
-                except Exception:
-                    continue
+                                note_val = str(it["note"]) if it.get("note") else None
+                                if opt == "MULTIPLE" and marked_list and len(marked_list) > 1 and not note_val:
+                                    note_val = (
+                                        f"Multiple answers marked ({', '.join(marked_list)}). Select one marked answer."
+                                    )
+
+                                normalized.append(
+                                    McqItemSchema(
+                                        questionNumber=q_num,
+                                        selectedOption=opt,  # type: ignore[arg-type]
+                                        markedOptions=marked_list,
+                                        confidence=conf,  # type: ignore[arg-type]
+                                        note=note_val,
+                                    )
+                                )
+                            detected_style = str(parsed.get("optionStyle", "")).upper().strip()
+                            if detected_style not in ("ALPHA", "NUMERIC"):
+                                detected_style = "NUMERIC" if has_numeric else "ALPHA"
+                            raw_labels = parsed.get("optionLabels")
+                            if isinstance(raw_labels, list) and len(raw_labels) >= 2:
+                                labels = [str(lbl).upper().strip() for lbl in raw_labels]
+                            else:
+                                labels = (
+                                    ["1", "2", "3", "4", "5"]
+                                    if detected_style == "NUMERIC"
+                                    else ["A", "B", "C", "D", "E"]
+                                )
+                            return model, detected_style, labels, normalized
+            except Exception:
+                pass
 
     # 3. Last-resort optical-mark fallback
     return "omr-vision-v1", "NUMERIC", ["1", "2", "3", "4", "5"], _analyze_optical_marks_fallback(images)
