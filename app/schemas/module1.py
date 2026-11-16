@@ -69,6 +69,7 @@ class McqExtractionRequest(BaseModel):
 class McqItemSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    pageNumber: Optional[int] = Field(None, ge=1, le=10)
     questionNumber: int = Field(..., ge=1)
     selectedOption: Literal[
         "A", "B", "C", "D", "E",

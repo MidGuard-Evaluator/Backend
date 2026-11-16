@@ -83,7 +83,6 @@ def _detect_omr_bubble_grid(
     Returns None if the image is not a multi-row OMR bubble sheet.
     """
     all_items: list[McqItemSchema] = []
-    q_offset = 0
     num_opts = len(labels)
 
     for page in images:
@@ -228,7 +227,7 @@ def _detect_omr_bubble_grid(
                 opt_xs = [x0 + i * dx for i in range(num_opts)]
 
             for r_idx, r_y in enumerate(rows_y):
-                q_num = q_offset + c_idx * len(rows_y) + r_idx + 1
+                q_num = c_idx * len(rows_y) + r_idx + 1
                 marked_indices: list[int] = []
                 for b_x, b_y in blobs:
                     if abs(b_y - r_y) < tol_y * 0.9 and (opt_xs[0] - dx * 0.6) <= b_x <= (opt_xs[-1] + dx * 0.6):
@@ -242,6 +241,7 @@ def _detect_omr_bubble_grid(
                 if len(marked_labels) == 0:
                     all_items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_num,
                             selectedOption="BLANK",
                             markedOptions=[],
@@ -252,6 +252,7 @@ def _detect_omr_bubble_grid(
                 elif len(marked_labels) == 1:
                     all_items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_num,
                             selectedOption=marked_labels[0],  # type: ignore[arg-type]
                             markedOptions=marked_labels,
@@ -261,6 +262,7 @@ def _detect_omr_bubble_grid(
                 else:
                     all_items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_num,
                             selectedOption="MULTIPLE",
                             markedOptions=marked_labels,
@@ -268,8 +270,6 @@ def _detect_omr_bubble_grid(
                             note=f"Multiple answers marked ({', '.join(marked_labels)}). Select one marked answer.",
                         )
                     )
-
-        q_offset += len(col_sub_centers) * len(rows_y)
 
     return all_items if all_items else None
 
@@ -342,9 +342,9 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
     """Fallback analyzer when both structured OMR blob detection and external Vision fail."""
     options = ["1", "2", "3", "4", "5"]
     items: list[McqItemSchema] = []
-    q_counter = 1
 
     for page in images:
+        q_counter = 1
         try:
             raw_bytes = base64.b64decode(page.base64Data)
             img = Image.open(io.BytesIO(raw_bytes)).convert("L")
@@ -383,6 +383,7 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
                     picked = options[band_hash[0] % 4]
                     items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_counter,
                             selectedOption=picked,  # type: ignore[arg-type]
                             markedOptions=[picked],
@@ -393,6 +394,7 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
                     cands = sorted([best_opt, second_opt])
                     items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_counter,
                             selectedOption="MULTIPLE",
                             markedOptions=cands,
@@ -403,6 +405,7 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
                 else:
                     items.append(
                         McqItemSchema(
+                            pageNumber=page.pageNumber,
                             questionNumber=q_counter,
                             selectedOption=best_opt,  # type: ignore[arg-type]
                             markedOptions=[best_opt],
@@ -415,6 +418,7 @@ def _analyze_optical_marks_fallback(images: list[McqPageImagePayload]) -> list[M
                 picked = options[b % 4]
                 items.append(
                     McqItemSchema(
+                        pageNumber=page.pageNumber,
                         questionNumber=q_counter,
                         selectedOption=picked,  # type: ignore[arg-type]
                         markedOptions=[picked],
@@ -454,100 +458,87 @@ async def extract_mcq_from_images(
     if omr_items:
         return "omr-hybrid-v2", option_style, option_labels, omr_items
 
-    # 2. Non-bubble sheet fallback: deterministic Gemini Vision full extraction (single pinned model)
-    parts: list[dict[str, Any]] = [{"text": MCQ_SYSTEM_PROMPT}] + image_parts
+    # 2. Non-bubble sheet fallback: deterministic Gemini Vision per-page extraction
     model = _resolve_gemini_model()
     if api_key:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
-            if model.startswith("gemini-"):
-                gen_config["responseMimeType"] = "application/json"
-            try:
-                resp = await client.post(
-                    url,
-                    json={
-                        "contents": [{"parts": parts}],
-                        "generationConfig": gen_config,
-                    },
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw_text = (
-                        data.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text", "")
+        vision_items: list[McqItemSchema] = []
+        vision_detected_style = option_style
+        vision_labels = option_labels
+        all_ok = True
+        for page in images:
+            enhanced_mime, enhanced_b64 = _enhance_sheet_for_vision(page)
+            parts = [
+                {"text": MCQ_SYSTEM_PROMPT},
+                {"inlineData": {"mimeType": enhanced_mime, "data": enhanced_b64}},
+            ]
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                gen_config: dict[str, Any] = {"temperature": 0.0, "topK": 1, "seed": 42}
+                if model.startswith("gemini-"):
+                    gen_config["responseMimeType"] = "application/json"
+                try:
+                    resp = await client.post(
+                        url,
+                        json={"contents": [{"parts": parts}], "generationConfig": gen_config},
                     )
-                    if raw_text:
-                        cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
-                        parsed = json.loads(cleaned)
-                        raw_items = parsed.get("items", [])
-                        if isinstance(raw_items, list) and len(raw_items) > 0:
-                            allowed_opts = {
-                                "A", "B", "C", "D", "E",
-                                "1", "2", "3", "4", "5",
-                                "BLANK", "MULTIPLE",
-                            }
-                            normalized: list[McqItemSchema] = []
-                            has_numeric = False
-                            for idx, it in enumerate(raw_items):
-                                q_num = int(it.get("questionNumber") or (idx + 1))
-                                opt = str(it.get("selectedOption", "BLANK")).upper().strip()
-                                if opt not in allowed_opts:
-                                    opt = "BLANK"
-                                if opt in {"1", "2", "3", "4", "5"}:
-                                    has_numeric = True
-
-                                raw_marked = it.get("markedOptions")
-                                marked_list: list[str] | None = None
-                                if isinstance(raw_marked, list) and len(raw_marked) > 0:
-                                    marked_list = [
-                                        str(m).upper().strip()
-                                        for m in raw_marked
-                                        if str(m).upper().strip() in {"A", "B", "C", "D", "E", "1", "2", "3", "4", "5"}
-                                    ]
-                                    if any(m in {"1", "2", "3", "4", "5"} for m in marked_list):
-                                        has_numeric = True
-                                elif opt not in ("BLANK", "MULTIPLE"):
-                                    marked_list = [opt]
-
-                                conf_val = it.get("confidence", "unknown")
-                                conf: float | str = (
-                                    round(float(conf_val), 2)
-                                    if isinstance(conf_val, (int, float)) and 0 <= float(conf_val) <= 1
-                                    else "unknown"
-                                )
-                                note_val = str(it["note"]) if it.get("note") else None
-                                if opt == "MULTIPLE" and marked_list and len(marked_list) > 1 and not note_val:
-                                    note_val = (
-                                        f"Multiple answers marked ({', '.join(marked_list)}). Select one marked answer."
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        raw_text = (
+                            data.get("candidates", [{}])[0]
+                            .get("content", {})
+                            .get("parts", [{}])[0]
+                            .get("text", "")
+                        )
+                        if raw_text:
+                            cleaned = raw_text.strip().removeprefix("```json").removesuffix("```").strip()
+                            parsed = json.loads(cleaned)
+                            raw_items = parsed.get("items", [])
+                            if isinstance(raw_items, list) and len(raw_items) > 0:
+                                allowed_opts = {
+                                    "A", "B", "C", "D", "E",
+                                    "1", "2", "3", "4", "5",
+                                    "BLANK", "MULTIPLE",
+                                }
+                                for idx, it in enumerate(raw_items):
+                                    q_num = int(it.get("questionNumber") or (idx + 1))
+                                    opt = str(it.get("selectedOption", "BLANK")).upper().strip()
+                                    if opt not in allowed_opts:
+                                        opt = "BLANK"
+                                    raw_marked = it.get("markedOptions")
+                                    marked_list: list[str] | None = None
+                                    if isinstance(raw_marked, list) and len(raw_marked) > 0:
+                                        marked_list = [
+                                            str(m).upper().strip()
+                                            for m in raw_marked
+                                            if str(m).upper().strip() in {"A", "B", "C", "D", "E", "1", "2", "3", "4", "5"}
+                                        ]
+                                    elif opt not in ("BLANK", "MULTIPLE"):
+                                        marked_list = [opt]
+                                    conf_val = it.get("confidence", "unknown")
+                                    conf: float | str = (
+                                        round(float(conf_val), 2)
+                                        if isinstance(conf_val, (int, float)) and 0 <= float(conf_val) <= 1
+                                        else "unknown"
                                     )
-
-                                normalized.append(
-                                    McqItemSchema(
-                                        questionNumber=q_num,
-                                        selectedOption=opt,  # type: ignore[arg-type]
-                                        markedOptions=marked_list,
-                                        confidence=conf,  # type: ignore[arg-type]
-                                        note=note_val,
+                                    note_val = str(it["note"]) if it.get("note") else None
+                                    if opt == "MULTIPLE" and marked_list and len(marked_list) > 1 and not note_val:
+                                        note_val = f"Multiple answers marked ({', '.join(marked_list)}). Select one marked answer."
+                                    vision_items.append(
+                                        McqItemSchema(
+                                            pageNumber=page.pageNumber,
+                                            questionNumber=q_num,
+                                            selectedOption=opt,  # type: ignore[arg-type]
+                                            markedOptions=marked_list,
+                                            confidence=conf,  # type: ignore[arg-type]
+                                            note=note_val,
+                                        )
                                     )
-                                )
-                            detected_style = str(parsed.get("optionStyle", "")).upper().strip()
-                            if detected_style not in ("ALPHA", "NUMERIC"):
-                                detected_style = "NUMERIC" if has_numeric else "ALPHA"
-                            raw_labels = parsed.get("optionLabels")
-                            if isinstance(raw_labels, list) and len(raw_labels) >= 2:
-                                labels = [str(lbl).upper().strip() for lbl in raw_labels]
-                            else:
-                                labels = (
-                                    ["1", "2", "3", "4", "5"]
-                                    if detected_style == "NUMERIC"
-                                    else ["A", "B", "C", "D", "E"]
-                                )
-                            return model, detected_style, labels, normalized
-            except Exception:
-                pass
+                                continue
+                    all_ok = False
+                except Exception:
+                    all_ok = False
+        if all_ok and vision_items:
+            return model, vision_detected_style, vision_labels, vision_items
 
     # 3. Last-resort optical-mark fallback
     return "omr-vision-v1", "NUMERIC", ["1", "2", "3", "4", "5"], _analyze_optical_marks_fallback(images)
